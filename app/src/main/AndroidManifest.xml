@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Phase 1: Core Assistant needs mic input, network to reach the
+         Termux socket server, and a foreground service so the wake-word
+         listener can keep running while the app is backgrounded. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Phase 2: AI Chat needs the camera for in-chat photo capture, and
+         the app declares a <queries> intent so it can verify a camera app
+         exists before launching one (required on Android 11+ for package
+         visibility). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Phase 3: PDF Studio picks images via the system Photo Picker
+         (ActivityResultContracts.PickMultipleVisualMedia), which needs no
+         storage/media runtime permission at all — so none is declared
+         here. It only needs to check for / launch a PDF viewer when the
+         user taps "Open" on a saved PDF (Android 11+ package visibility
+         requires this to be declared up front). -->
+    <!-- Phase 4: Android Automation.
+         - WRITE_SETTINGS is a "special" permission (no runtime popup);
+           the app checks Settings.System.canWrite() and sends the user
+           to Settings.ACTION_MANAGE_WRITE_SETTINGS itself when missing,
+           via BrightnessController — see its kdoc for why brightness
+           control cannot silently succeed without this.
+         - BLUETOOTH_CONNECT is the modern (API 31+) runtime permission
+           needed just to read/toggle adapter state; BLUETOOTH/
+           BLUETOOTH_ADMIN cover the same for API < 31 only, per
+           maxSdkVersion, since API 31+ superseded them.
+         - No permission at all is needed for volume (AudioManager),
+           flashlight (CameraManager torch mode), media-key dispatch, or
+           listing/launching installed apps (ACTION_MAIN/CATEGORY_LAUNCHER
+           query) — see the individual controllers in core/automation. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+
+    <queries>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/pdf" />
+        </intent>
+        <!-- Phase 4: app launcher needs to see launchable activities on
+             Android 11+ package-visibility rules — this is the same
+             narrow, Play-Store-safe query the device's own home screen
+             uses (ACTION_MAIN/CATEGORY_LAUNCHER), not QUERY_ALL_PACKAGES. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Phase 5: named so core/automation/social can honestly check
+             "is this app installed" and launch it — without this,
+             Android 11+ package visibility makes getLaunchIntentForPackage
+             silently return null even when the app is present. -->
+        <package android:name="com.whatsapp" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.google.android.youtube" />
+    </queries>
+
+    <application
+        android:name=".SaApplication"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SA"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic is required because the Termux socket
+             server (127.0.0.1 / local network) is plain TCP, not TLS.
+             This is safe because traffic never leaves the device/LAN;
+             it should be scoped to a network-security-config in a later
+             phase instead of a blanket flag. -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SA"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".core.assistant.AssistantForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Phase 5: Accessibility Automation. This is what actually lets
+             WhatsApp/Instagram/YouTube automation (core/automation/social)
+             find and tap real on-screen buttons. It can only be turned on
+             by the user themselves from Settings > Accessibility — Android
+             blocks apps from silently enabling their own accessibility
+             service — see AccessibilityPermissionHelper for the honest
+             check/redirect flow used in the Tools tab. -->
+        <service
+            android:name=".core.accessibility.SaAccessibilityService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- Exposes attachments/ and exports/ (app-private storage) to the
+             camera app and to Share sheets, without granting broad
+             filesystem access — the recommended pattern since Android
+             stopped allowing raw file:// Uris across apps. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">SA</string>
+    <string name="tagline">Your Personal AI Assistant</string>
+    <string name="tap_to_speak">Tap to Speak</string>
+    <string name="socket_disconnected">Termux server se connect nahi hai</string>
+    <string name="socket_connected">Connected</string>
+    <string name="accessibility_service_description">SA ko WhatsApp/Instagram/YouTube jaisi apps mein wahi buttons dabaane deta hai jo aap khud dabate — sirf tab jab aap Tools tab se koi automation action chalate hain.</string>
+</resources>
