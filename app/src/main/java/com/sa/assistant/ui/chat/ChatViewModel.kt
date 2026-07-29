@@ -8,6 +8,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sa.assistant.core.export.ChatPdfExporter
 import com.sa.assistant.core.files.AttachmentStorage
+import com.sa.assistant.core.tts.SaTextToSpeech
+import com.sa.assistant.core.tts.TtsPreferences
 import com.sa.assistant.data.model.Attachment
 import com.sa.assistant.data.model.AttachmentKind
 import com.sa.assistant.data.model.ChatMessage
@@ -18,6 +20,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -40,6 +43,8 @@ class ChatViewModel @Inject constructor(
     private val repository: ChatRepository,
     private val attachmentStorage: AttachmentStorage,
     private val pdfExporter: ChatPdfExporter,
+    private val tts: SaTextToSpeech,
+    private val ttsPreferences: TtsPreferences,
     @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
@@ -84,7 +89,30 @@ class ChatViewModel @Inject constructor(
                     )
                 }
                 _uiState.value = _uiState.value.copy(messages = updated)
+
+                // Speak only once a reply is fully assembled (done=true) —
+                // never mid-stream, so SA doesn't read out partial chunks.
+                if (response.done) {
+                    val finalMessage = updated.lastOrNull { it.id == response.id && !it.isFromUser }
+                    if (finalMessage != null) speakIfEnabled(finalMessage.text)
+                }
             }
+        }
+    }
+
+    /** Long-press "Speak" — reads [message] aloud on demand, regardless of the auto-speak toggle in Settings. */
+    fun speakMessage(message: ChatMessage) {
+        viewModelScope.launch {
+            val prefs = ttsPreferences.snapshot.first()
+            tts.speak(message.text, rate = prefs.speechRate, pitch = prefs.pitch, voiceName = prefs.voiceName)
+        }
+    }
+
+    private fun speakIfEnabled(text: String) {
+        viewModelScope.launch {
+            val prefs = ttsPreferences.snapshot.first()
+            if (!prefs.isEnabled) return@launch
+            tts.speak(text, rate = prefs.speechRate, pitch = prefs.pitch, voiceName = prefs.voiceName)
         }
     }
 
@@ -173,5 +201,6 @@ class ChatViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         repository.disconnect()
+        tts.stop()
     }
 }

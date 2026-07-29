@@ -2,7 +2,44 @@
 
 Yeh app sirf personal use ke liye ban raha hai (Play Store release nahi).
 
-## Naya is zip mein: Phase 3 Part 2B (2 of 2, ab COMPLETE) — Text/Sticky Note/Shape
+## Naya is zip mein: Phase 6 Part 2 — TTS (Voice Replies)
+
+Phase 6 Part 1 (pichle zip mein) ne "SA" wake word suna; ab Part 2 SA ko wapas
+bolna sikhata hai. Koi bundled voice model ya cloud TTS API nahi — Android
+apne hi `TextToSpeech` engine (jo bhi device par installed hai — Google's,
+ya koi doosra) ko real use karta hai, bilkul waise jaise koi aur app karti hai:
+
+- **Auto-speak** — Settings mein "Voice Replies" switch on karo: ab jab bhi
+  SA ka reply poora aa jaata hai (`done: true`, streaming khatam), wahi text
+  turant zor se bhi bol diya jaata hai. Mid-stream (partial chunks) kabhi
+  nahi bola jaata — sirf final assembled reply.
+- **Per-message Speak** — Chat mein kisi bhi SA reply par long-press karo,
+  "Speak" option se sirf wahi ek message on-demand bol sakte ho (auto-speak
+  switch off ho tab bhi).
+- **Real voice list** — Settings ka voice picker `TextToSpeech.getVoices()`
+  se seedha device ki apni voices dikhata hai (jo bhi languages/accents us
+  engine mein installed hain) — koi hardcoded fake list nahi. Kuch voices
+  "network" label ke saath aati hain agar wo cloud-based hain.
+- **Speed aur Pitch sliders** — Android ke apne 0.5x–2.0x scale par, real
+  `setSpeechRate`/`setPitch`.
+- **Test button** — turant ek sample line bol ke sunata hai jo abhi voice/
+  speed/pitch chuna hai, bina kisi chat message ke.
+- **Honest markdown cleanup** — reply mein agar `**bold**`, `` `code` ``,
+  `# heading` jaisa formatting ho to bolte waqt sirf punctuation hata di
+  jaati hai (text same rehta hai) taaki "star star" jaisa awkward na sune.
+- Agar device par koi TTS engine hi installed nahi hai, screen saaf keh
+  deta hai "koi TTS engine install nahi hai" — koi fake "speaking" state
+  nahi dikhaya jaata.
+
+Engine: `SaTextToSpeech` (`core/tts/`) — ek hi real wrapper jo chat
+(auto-speak + per-message) aur Settings (test button) dono use karte hain,
+taaki jo Settings mein test kiya wahi exactly chat replies mein bhi sunai de.
+
+**Abhi Phase 6 mein baaki:** Voice verification (Part 3), Whisper STT
+(Part 4), aur memory (Part 5) — agle messages mein, isi ek-part-ek-baar
+tarike se.
+
+## Pichla zip: Phase 3 Part 2B (2 of 2, ab COMPLETE) — Text/Sticky Note/Shape
 
 Part 2B ka pehla half (highlight/underline/strikethrough/draw) pichle zip
 mein tha; yeh zip usi Mark/Edit screen mein baaki teen tools jodta hai —
@@ -152,10 +189,19 @@ Gradle 8.9 use karta hai.
 | 3 Part 2A | PDF Page Manager — merge/split/rotate/reorder/delete | ✅ Complete |
 | 3 Part 2B (1/2) | PDF Mark/Edit — highlight/underline/strikethrough/free-hand draw/undo-redo | ✅ Complete |
 | 3 Part 2B (2/2) | PDF Mark/Edit — text add/sticky note/shape tools | ✅ Complete |
-| 4 | Android Automation — volume/brightness/flashlight/bluetooth | Baaki |
-| 5 | Accessibility Automation — WhatsApp/Instagram/YouTube control | Baaki |
-| 6 | Advanced AI Integration — wake word, voice verification, Whisper STT, TTS, memory | Baaki |
+| 4 | Android Automation — volume/brightness/flashlight/bluetooth/music/app-launch | ✅ Complete |
+| 5 | Accessibility Automation — WhatsApp/Instagram/YouTube control | ✅ Complete |
+| 6 Part 1 | Advanced AI — Wake Word ("SA" background listening) | ✅ Complete |
+| 6 Part 2 | Advanced AI — TTS (voice replies, auto-speak + per-message) | ✅ Complete |
+| 6 Part 3 | Advanced AI — Voice verification | Baaki |
+| 6 Part 4 | Advanced AI — Whisper STT | Baaki |
+| 6 Part 5 | Advanced AI — Memory | Baaki |
 | 7 | Optimization & Personal-Use Polish — performance, stability, final settings | Baaki |
+
+Note: Phase 4 aur 5 ka status is is zip mein maujood code se hai (dono
+`ToolsScreen`/`core/automation/` aur `core/accessibility/` +
+`core/automation/social/` mein poori tarah maujood hain) — unki individual
+status reports pichle messages mein already share ho chuki thi.
 
 Har phase apna zip + updated status PDF milega jab tak poora app ban na jaaye.
 Koi fake feature, koi placeholder, koi TODO nahi chhoda jaata — jo bhi phase

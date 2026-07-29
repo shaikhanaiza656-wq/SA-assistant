@@ -126,7 +126,8 @@ fun ChatScreen(viewModel: ChatViewModel = hiltViewModel()) {
                 MessageBubble(
                     message = message,
                     onCopy = { viewModel.copyMessage(message) },
-                    onShare = { viewModel.shareMessage(message) }
+                    onShare = { viewModel.shareMessage(message) },
+                    onSpeak = { viewModel.speakMessage(message) }
                 )
             }
         }
@@ -244,7 +245,7 @@ private fun AttachmentPreviewRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(message: ChatMessage, onCopy: () -> Unit, onShare: () -> Unit) {
+private fun MessageBubble(message: ChatMessage, onCopy: () -> Unit, onShare: () -> Unit, onSpeak: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
     val alignment = if (message.isFromUser) Alignment.CenterEnd else Alignment.CenterStart
     val bubbleColor = if (message.isFromUser) {
@@ -279,6 +280,9 @@ private fun MessageBubble(message: ChatMessage, onCopy: () -> Unit, onShare: () 
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("Copy") }, onClick = { onCopy(); menuOpen = false })
                 DropdownMenuItem(text = { Text("Share") }, onClick = { onShare(); menuOpen = false })
+                if (!message.isFromUser) {
+                    DropdownMenuItem(text = { Text("Speak") }, onClick = { onSpeak(); menuOpen = false })
+                }
             }
         }
     }
