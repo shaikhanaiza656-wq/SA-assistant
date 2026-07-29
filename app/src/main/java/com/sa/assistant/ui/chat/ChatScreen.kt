@@ -107,6 +107,9 @@ fun ChatScreen(viewModel: ChatViewModel = hiltViewModel()) {
                 is ChatUiEvent.Error -> {
                     android.widget.Toast.makeText(context, event.message, android.widget.Toast.LENGTH_LONG).show()
                 }
+                is ChatUiEvent.LaunchSystemIntent -> {
+                    context.startActivity(event.intent)
+                }
             }
         }
     }

@@ -44,13 +44,26 @@ data class SaRequest(
  * A Phase-1 server that only ever sends one complete reply per id doesn't
  * need to set this field at all — it defaults to true, so single-shot
  * replies keep working exactly as before.
+ *
+ * [action] / [actionParams] close a real gap: the Termux side's own
+ * "Intent Finder / Command Router" (the server already understands
+ * commands like "SA, brightness 50 percent kar do") had no way to make
+ * the *phone* actually do anything — [SaResponse] only ever carried text
+ * back. These two fields are additive and default to `null`/empty, so a
+ * server that never sends them keeps behaving exactly as before; a
+ * server that does send them (e.g. `"action": "brightness_set",
+ * "actionParams": {"percent": "50"}`) lets [AutomationCommand.fromWire]
+ * turn it into one of the real, already-existing controllers in
+ * `core/automation` — never a new/fake automation path.
  */
 @Serializable
 data class SaResponse(
     val status: String,
     val reply: String,
     val id: Long,
-    val done: Boolean = true
+    val done: Boolean = true,
+    val action: String? = null,
+    val actionParams: Map<String, String> = emptyMap()
 )
 
 /** Request "type" values the Python router understands. Kept as an enum

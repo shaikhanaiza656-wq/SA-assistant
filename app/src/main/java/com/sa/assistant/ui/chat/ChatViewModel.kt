@@ -6,12 +6,14 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.sa.assistant.core.automation.AutomationCommandExecutor
 import com.sa.assistant.core.export.ChatPdfExporter
 import com.sa.assistant.core.files.AttachmentStorage
 import com.sa.assistant.core.tts.SaTextToSpeech
 import com.sa.assistant.core.tts.TtsPreferences
 import com.sa.assistant.data.model.Attachment
 import com.sa.assistant.data.model.AttachmentKind
+import com.sa.assistant.data.model.AutomationCommand
 import com.sa.assistant.data.model.ChatMessage
 import com.sa.assistant.data.model.SaAttachmentPayload
 import com.sa.assistant.data.repository.ChatRepository
@@ -45,6 +47,7 @@ class ChatViewModel @Inject constructor(
     private val pdfExporter: ChatPdfExporter,
     private val tts: SaTextToSpeech,
     private val ttsPreferences: TtsPreferences,
+    private val automationExecutor: AutomationCommandExecutor,
     @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
@@ -96,7 +99,30 @@ class ChatViewModel @Inject constructor(
                     val finalMessage = updated.lastOrNull { it.id == response.id && !it.isFromUser }
                     if (finalMessage != null) speakIfEnabled(finalMessage.text)
                 }
+
+                // Real "voice command -> real automation" bridge: only once the
+                // reply is fully assembled, and only if the server actually
+                // attached an action (older/plain servers never do, so this
+                // is a no-op for them).
+                if (response.done && response.action != null) {
+                    runAutomationAction(response.action, response.actionParams)
+                }
             }
+        }
+    }
+
+    private fun runAutomationAction(action: String, params: Map<String, String>) {
+        val command = AutomationCommand.fromWire(action, params)
+        val outcome = automationExecutor.execute(command)
+        _uiState.value = _uiState.value.copy(
+            messages = _uiState.value.messages + ChatMessage(
+                id = System.currentTimeMillis(),
+                text = outcome.message,
+                isFromUser = false
+            )
+        )
+        outcome.followUpIntent?.let { intent ->
+            _events.trySend(ChatUiEvent.LaunchSystemIntent(intent))
         }
     }
 
