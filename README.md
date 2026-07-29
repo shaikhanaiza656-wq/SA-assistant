@@ -2,6 +2,29 @@
 
 Yeh app sirf personal use ke liye ban raha hai (Play Store release nahi).
 
+## ⚠️ Addendum — mic/loop bug fix (aapke bheje screenshot/report ke baad)
+
+Aapne bataya: SA khud ki hi awaaz sunta reh jaata hai, sirf beep/loop chalta rehta hai, mic ki
+alag awaaz aati hai, aur voice command se kuch hota nahi. Code check karne par do real bugs
+mile aur fix kar diye:
+
+1. **TTS aur wake-word mic ek doosre se bekhabar the.** `WakeWordListener` aur `SaTextToSpeech`
+   kabhi baat nahi karte the — jab SA bolta tha, mic saath-saath chalta rehta tha aur SA ki apni
+   awaaz ko sun/react kar sakta tha. Fix: `WakeWordListener` mein naye `pauseForSpeech()` /
+   `resumeAfterSpeech()` methods, aur `AssistantForegroundService` ab `SaTextToSpeech.state` ko
+   observe karke — jab bhi `SPEAKING` ho, mic band; jab wapas `READY` ho, mic phir se on.
+2. **Har recognizer session ka start/stop beep** (Android ka apna system "ding") ~400ms ke restart
+   loop ke saath lagatar bajta rehta tha. Fix: `AudioManager.adjustStreamVolume(STREAM_MUSIC,
+   ADJUST_MUTE/UNMUTE)` se har session-transition ke aas-paas thodi der ke liye mute — ref-counted
+   taaki overlapping mute/unmute calls ek doosre ko cancel na karein. Naya manifest permission
+   `MODIFY_AUDIO_SETTINGS` (normal, koi runtime prompt nahi) isi ke liye chahiye.
+
+**Honest baat — voice command abhi bhi kaam nahi karega, ye bug nahi hai:** wake word sunte hi
+abhi sirf Chat tab khulta hai (`AssistantForegroundService.launchChatOnWake`). Bola hua command
+("volume badha do") capture karke bhejne wala part (Whisper STT — Phase 6 Part 4) abhi bana hi
+nahi hai, isiliye upar wale 2 fix ke baad bhi "SA, volume kam karo" bolne se kuch nahi hoga jab
+tak wo part banaya na jaaye.
+
 ## Naya is zip mein: Phase 6 Part 2 — TTS (Voice Replies)
 
 Phase 6 Part 1 (pichle zip mein) ne "SA" wake word suna; ab Part 2 SA ko wapas

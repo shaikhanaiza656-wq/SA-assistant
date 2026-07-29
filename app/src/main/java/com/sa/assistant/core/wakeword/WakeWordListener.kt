@@ -3,6 +3,7 @@ package com.sa.assistant.core.wakeword
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -53,9 +54,39 @@ class WakeWordListener @Inject constructor(
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val audioManager: AudioManager? =
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private var recognizer: SpeechRecognizer? = null
     private var isRunning = false
     private var currentWakePhrase = DEFAULT_WAKE_PHRASE
+
+    // --- Fix 1: don't listen to our own TTS voice ---
+    // While SA is speaking (TTS), the recognizer must be fully torn down —
+    // otherwise it hears SA's own playback through the mic and can
+    // false-trigger or spam restarts. AssistantForegroundService calls
+    // pauseForSpeech()/resumeAfterSpeech() around TTS start/stop.
+    private var isPausedForSpeech = false
+
+    // --- Fix 2: silence the recognizer's start/stop beep ---
+    // Every SpeechRecognizer session plays a system "ding" on start and
+    // stop. With a session restarting every ~400ms this became a constant
+    // beeping loop. We briefly mute STREAM_MUSIC (where the beep plays)
+    // around each start/stop transition. Ref-counted so overlapping
+    // mute/unmute calls (start right after a stop) can't cancel each other out.
+    private var muteDepth = 0
+    private fun muteBeep() {
+        if (muteDepth == 0) {
+            runCatching { audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0) }
+        }
+        muteDepth++
+    }
+    private fun unmuteBeep() {
+        if (muteDepth <= 0) return
+        muteDepth--
+        if (muteDepth == 0) {
+            runCatching { audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0) }
+        }
+    }
 
     private val _state = MutableStateFlow(WakeWordState.IDLE)
     val state: StateFlow<WakeWordState> = _state.asStateFlow()
@@ -91,17 +122,52 @@ class WakeWordListener @Inject constructor(
     fun stop() {
         mainHandler.post {
             isRunning = false
+            isPausedForSpeech = false
             mainHandler.removeCallbacksAndMessages(RESTART_TOKEN)
+            muteBeep()
             recognizer?.let {
                 it.stopListening()
                 it.destroy()
             }
             recognizer = null
             _state.value = WakeWordState.IDLE
+            mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
+        }
+    }
+
+    /**
+     * Tears the recognizer down without touching [isRunning] or the user's
+     * enabled-preference — call right before [SaTextToSpeech] starts
+     * speaking so the mic can't hear SA's own voice. Pairs with
+     * [resumeAfterSpeech]. Safe to call repeatedly / when not running.
+     */
+    fun pauseForSpeech() {
+        mainHandler.post {
+            if (!isRunning || isPausedForSpeech) return@post
+            isPausedForSpeech = true
+            mainHandler.removeCallbacksAndMessages(RESTART_TOKEN)
+            muteBeep()
+            recognizer?.let {
+                it.stopListening()
+                it.destroy()
+            }
+            recognizer = null
+            _state.value = WakeWordState.IDLE
+            mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
+        }
+    }
+
+    /** Resumes listening after [pauseForSpeech] — call once TTS playback finishes. */
+    fun resumeAfterSpeech() {
+        mainHandler.post {
+            if (!isRunning || !isPausedForSpeech) return@post
+            isPausedForSpeech = false
+            createRecognizerAndListen()
         }
     }
 
     private fun createRecognizerAndListen() {
+        muteBeep()
         val r = SpeechRecognizer.createSpeechRecognizer(context)
         recognizer = r
         r.setRecognitionListener(object : RecognitionListener {
@@ -135,6 +201,7 @@ class WakeWordListener @Inject constructor(
             override fun onEvent(eventType: Int, params: Bundle?) { /* no-op */ }
         })
         r.startListening(recognizerIntent())
+        mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
     }
 
     /** Returns true if a wake match fired (so the caller can stop this session early). */
@@ -149,13 +216,15 @@ class WakeWordListener @Inject constructor(
     }
 
     private fun scheduleRestart() {
+        muteBeep()
         recognizer?.destroy()
         recognizer = null
-        if (!isRunning) return
+        mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
+        if (!isRunning || isPausedForSpeech) return
         // A short delay avoids hammering the recognizer service in a tight
         // loop when it errors out repeatedly (e.g. no network).
         mainHandler.postAtTime(
-            { if (isRunning) createRecognizerAndListen() },
+            { if (isRunning && !isPausedForSpeech) createRecognizerAndListen() },
             RESTART_TOKEN,
             android.os.SystemClock.uptimeMillis() + RESTART_DELAY_MS
         )
@@ -172,6 +241,7 @@ class WakeWordListener @Inject constructor(
     companion object {
         private const val TAG = "WakeWordListener"
         private const val RESTART_DELAY_MS = 400L
+        private const val BEEP_MUTE_MS = 250L
         private val RESTART_TOKEN = Any()
     }
 }

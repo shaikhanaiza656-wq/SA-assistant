@@ -10,8 +10,10 @@ import androidx.core.app.NotificationCompat
 import com.sa.assistant.MainActivity
 import com.sa.assistant.R
 import com.sa.assistant.SaApplication
+import com.sa.assistant.core.tts.SaTextToSpeech
 import com.sa.assistant.core.wakeword.WakeWordListener
 import com.sa.assistant.core.wakeword.WakeWordPreferences
+import com.sa.assistant.data.model.TtsEngineState
 import com.sa.assistant.data.model.WakeWordState
 import com.sa.assistant.socket.SaSocketClient
 import dagger.hilt.android.AndroidEntryPoint
@@ -44,10 +46,14 @@ class AssistantForegroundService : Service() {
     @Inject
     lateinit var wakeWordPreferences: WakeWordPreferences
 
+    @Inject
+    lateinit var textToSpeech: SaTextToSpeech
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var preferencesJob: Job? = null
     private var wakeEventsJob: Job? = null
     private var stateJob: Job? = null
+    private var ttsCoordinationJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -77,6 +83,19 @@ class AssistantForegroundService : Service() {
                 updateNotification(state)
             }
         }
+
+        // Bug fix: without this, the wake-word mic stays open while SA is
+        // speaking (TTS) and can hear/react to its own voice, or spam
+        // restart because the recognizer picks up playback as noise.
+        ttsCoordinationJob = scope.launch {
+            textToSpeech.state.collect { ttsState ->
+                if (ttsState == TtsEngineState.SPEAKING) {
+                    wakeWordListener.pauseForSpeech()
+                } else {
+                    wakeWordListener.resumeAfterSpeech()
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -90,6 +109,7 @@ class AssistantForegroundService : Service() {
         preferencesJob?.cancel()
         wakeEventsJob?.cancel()
         stateJob?.cancel()
+        ttsCoordinationJob?.cancel()
         wakeWordListener.stop()
         socketClient.stop()
         super.onDestroy()
