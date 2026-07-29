@@ -148,6 +148,7 @@ private fun wakeWordStatusText(isEnabled: Boolean, state: WakeWordState): String
     if (!isEnabled) return "Off — background mein \"SA\" ke liye sun nahi raha."
     return when (state) {
         WakeWordState.LISTENING -> "Chalu hai — background mein \"SA\" sun raha hai."
+        WakeWordState.CAPTURING_COMMAND -> "\"SA\" sun liya — ab command bolo."
         WakeWordState.MIC_PERMISSION_REQUIRED -> "Microphone permission chahiye — abhi sun nahi paa raha."
         WakeWordState.RECOGNIZER_UNAVAILABLE -> "Is device par koi speech recognizer nahi mila — sun nahi paa raha."
         WakeWordState.ERROR -> "Listener restart ho raha hai (network ya recognizer glitch)."

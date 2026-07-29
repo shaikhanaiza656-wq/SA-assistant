@@ -7,14 +7,17 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.sa.assistant.MainActivity
 import com.sa.assistant.R
 import com.sa.assistant.SaApplication
+import com.sa.assistant.core.automation.AutomationCommandExecutor
 import com.sa.assistant.core.tts.SaTextToSpeech
+import com.sa.assistant.core.tts.TtsPreferences
 import com.sa.assistant.core.wakeword.WakeWordListener
 import com.sa.assistant.core.wakeword.WakeWordPreferences
+import com.sa.assistant.data.model.AutomationCommand
 import com.sa.assistant.data.model.TtsEngineState
 import com.sa.assistant.data.model.WakeWordState
+import com.sa.assistant.data.repository.ChatRepository
 import com.sa.assistant.socket.SaSocketClient
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -22,23 +25,41 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 /**
  * Keeps [SaSocketClient] alive while the app is backgrounded (Phase 1), and
- * — as of Phase 6 Part 1 — actually drives [WakeWordListener]: it observes
- * [WakeWordPreferences] (enabled flag + configured phrase) to start/stop
- * listening, and on every [WakeWordListener.wakeDetected] event it brings
- * [MainActivity] to the front with [MainActivity.EXTRA_WAKE_TRIGGERED] so
- * the user lands straight on the Chat tab. The notification text also now
- * reflects the real [WakeWordListener.state] instead of a static string.
+ * drives [WakeWordListener]: observes [WakeWordPreferences] (enabled flag +
+ * configured phrase) to start/stop listening, coordinates it with
+ * [SaTextToSpeech] so the mic can't hear SA's own voice, and — the real
+ * point of the whole background pipeline — takes whatever command
+ * [WakeWordListener.commandCaptured] reports, sends it through the exact
+ * same chat pipeline a typed message uses ([ChatRepository.sendMessage]),
+ * runs any real automation action the reply carries
+ * ([AutomationCommandExecutor]), and speaks the outcome back
+ * ([SaTextToSpeech]) — all without needing [com.sa.assistant.MainActivity]
+ * to be open. [VoiceReplyDedupe] stops that same response from being
+ * double-executed/double-spoken if the Chat screen also happens to be open
+ * at the time.
+ *
+ * Honest limitation: [response.action] only ever arrives if the Termux
+ * Python server (a separate codebase, not part of this Android project)
+ * actually decided on and sent an action for what was said. If the server
+ * hasn't been updated to do that yet, the spoken command still reaches it
+ * and gets a real spoken reply back — it just won't trigger on-device
+ * automation until the server-side half sends `action`/`actionParams`.
  */
 @AndroidEntryPoint
 class AssistantForegroundService : Service() {
 
     @Inject
     lateinit var socketClient: SaSocketClient
+
+    @Inject
+    lateinit var chatRepository: ChatRepository
 
     @Inject
     lateinit var wakeWordListener: WakeWordListener
@@ -49,11 +70,20 @@ class AssistantForegroundService : Service() {
     @Inject
     lateinit var textToSpeech: SaTextToSpeech
 
+    @Inject
+    lateinit var ttsPreferences: TtsPreferences
+
+    @Inject
+    lateinit var automationExecutor: AutomationCommandExecutor
+
+    @Inject
+    lateinit var voiceReplyDedupe: VoiceReplyDedupe
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var preferencesJob: Job? = null
-    private var wakeEventsJob: Job? = null
     private var stateJob: Job? = null
     private var ttsCoordinationJob: Job? = null
+    private var commandCapturedJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -69,12 +99,6 @@ class AssistantForegroundService : Service() {
                 } else {
                     wakeWordListener.stop()
                 }
-            }
-        }
-
-        wakeEventsJob = scope.launch {
-            wakeWordListener.wakeDetected.collect {
-                launchChatOnWake()
             }
         }
 
@@ -96,6 +120,18 @@ class AssistantForegroundService : Service() {
                 }
             }
         }
+
+        // The real "wake -> command -> action -> spoken confirmation" loop.
+        // Deliberately does NOT bring MainActivity to the foreground —
+        // this is meant to run silently in the background; the only
+        // feedback the user gets is the spoken confirmation (and the
+        // notification text below), same as any other background voice
+        // assistant.
+        commandCapturedJob = scope.launch {
+            wakeWordListener.commandCaptured.collect { commandText ->
+                handleVoiceCommand(commandText)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -107,9 +143,9 @@ class AssistantForegroundService : Service() {
 
     override fun onDestroy() {
         preferencesJob?.cancel()
-        wakeEventsJob?.cancel()
         stateJob?.cancel()
         ttsCoordinationJob?.cancel()
+        commandCapturedJob?.cancel()
         wakeWordListener.stop()
         socketClient.stop()
         super.onDestroy()
@@ -117,17 +153,43 @@ class AssistantForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun launchChatOnWake() {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(MainActivity.EXTRA_WAKE_TRIGGERED, true)
+    private fun handleVoiceCommand(commandText: String) {
+        if (commandText.isBlank()) return
+        scope.launch {
+            updateNotification(WakeWordState.CAPTURING_COMMAND, overrideText = "SA: \"$commandText\" — bhej raha hoon...")
+            val id = chatRepository.sendMessage(commandText)
+            val response = withTimeoutOrNull(SERVER_REPLY_TIMEOUT_MS) {
+                chatRepository.responses.first { it.id == id && it.done }
+            }
+            if (response == null) {
+                speakNow("Server se jawab nahi aaya, connection check karo.")
+                return@launch
+            }
+            when {
+                response.action != null && voiceReplyDedupe.claimAction(id) -> {
+                    val outcome = automationExecutor.execute(
+                        AutomationCommand.fromWire(response.action, response.actionParams)
+                    )
+                    speakNow(outcome.message)
+                }
+                response.action == null && voiceReplyDedupe.claimSpeak(id) -> {
+                    speakNow(response.reply)
+                }
+                // else: the Chat screen's own collector already claimed this
+                // response first (screen was open) — nothing left to do here.
+            }
         }
-        startActivity(intent)
     }
 
-    private fun updateNotification(state: WakeWordState) {
-        val text = when (state) {
+    private suspend fun speakNow(text: String) {
+        val prefs = ttsPreferences.snapshot.first()
+        textToSpeech.speak(text, rate = prefs.speechRate, pitch = prefs.pitch, voiceName = prefs.voiceName)
+    }
+
+    private fun updateNotification(state: WakeWordState, overrideText: String? = null) {
+        val text = overrideText ?: when (state) {
             WakeWordState.LISTENING -> "SA is listening for you"
+            WakeWordState.CAPTURING_COMMAND -> "SA: sun raha hoon, bolo..."
             WakeWordState.MIC_PERMISSION_REQUIRED -> "SA: mic permission needed for wake word"
             WakeWordState.RECOGNIZER_UNAVAILABLE -> "SA: no speech recognizer on this device"
             WakeWordState.ERROR -> "SA is reconnecting its wake-word listener..."
@@ -154,5 +216,6 @@ class AssistantForegroundService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 42
+        private const val SERVER_REPLY_TIMEOUT_MS = 15_000L
     }
 }

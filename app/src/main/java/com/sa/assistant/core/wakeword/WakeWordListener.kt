@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.sa.assistant.data.model.DEFAULT_WAKE_PHRASE
 import com.sa.assistant.data.model.WakeWordState
+import com.sa.assistant.data.model.extractCommandAfterWake
 import com.sa.assistant.data.model.matchesWakePhrase
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.Channel
@@ -96,6 +97,17 @@ class WakeWordListener @Inject constructor(
      *  react won't build up a backlog of stale triggers. */
     val wakeDetected: Flow<Unit> = wakeEvents.receiveAsFlow()
 
+    private val commandEvents = Channel<String>(Channel.BUFFERED)
+    /**
+     * Emits the actual spoken command text once it's been captured — either
+     * extracted from the same breath as the wake word ("SA volume badha
+     * do") or from the dedicated one-shot follow-up session that opens when
+     * the user says just "SA" and pauses. The caller (AssistantForegroundService)
+     * sends this text through the normal chat pipeline, same as if it had
+     * been typed.
+     */
+    val commandCaptured: Flow<String> = commandEvents.receiveAsFlow()
+
     /** Starts (or restarts, if the phrase changed) continuous listening for [wakePhrase]. Safe to call repeatedly. */
     fun start(wakePhrase: String = DEFAULT_WAKE_PHRASE) {
         mainHandler.post {
@@ -176,14 +188,32 @@ class WakeWordListener @Inject constructor(
             }
 
             override fun onResults(results: Bundle?) {
-                handleTranscripts(results)
-                scheduleRestart()
+                val transcripts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+                val matchedTranscript = transcripts.firstOrNull { matchesWakePhrase(it, currentWakePhrase) }
+                if (matchedTranscript == null) {
+                    scheduleRestart()
+                    return
+                }
+                Log.d(TAG, "Wake phrase matched")
+                wakeEvents.trySend(Unit)
+                val remainder = extractCommandAfterWake(matchedTranscript, currentWakePhrase)
+                if (remainder != null) {
+                    // "SA volume badha do" said in one breath — no follow-up needed.
+                    commandEvents.trySend(remainder)
+                    scheduleRestart()
+                } else {
+                    // Just "SA" alone — open a dedicated one-shot session for the command.
+                    startCommandCaptureSession()
+                }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
                 // A wake word doesn't need to wait for a full silence-terminated
-                // result — checking partials makes detection feel instant.
-                if (handleTranscripts(partialResults)) {
+                // result — checking partials makes detection feel instant. We
+                // still let onResults do the actual command-extraction/capture
+                // decision once this session finalizes below.
+                val transcripts = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+                if (transcripts.any { matchesWakePhrase(it, currentWakePhrase) }) {
                     r.stopListening()
                 }
             }
@@ -204,15 +234,38 @@ class WakeWordListener @Inject constructor(
         mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
     }
 
-    /** Returns true if a wake match fired (so the caller can stop this session early). */
-    private fun handleTranscripts(bundle: Bundle?): Boolean {
-        val transcripts = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-        val matched = transcripts.any { matchesWakePhrase(it, currentWakePhrase) }
-        if (matched) {
-            Log.d(TAG, "Wake phrase matched")
-            wakeEvents.trySend(Unit)
-        }
-        return matched
+    /** One-shot session dedicated to capturing the command after a bare "SA" (no follow-up words yet). */
+    private fun startCommandCaptureSession() {
+        muteBeep()
+        _state.value = WakeWordState.CAPTURING_COMMAND
+        val r = SpeechRecognizer.createSpeechRecognizer(context)
+        recognizer = r
+        r.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { /* stays CAPTURING_COMMAND */ }
+
+            override fun onResults(results: Bundle?) {
+                val transcript = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    .orEmpty().firstOrNull()?.trim()
+                if (!transcript.isNullOrEmpty()) {
+                    commandEvents.trySend(transcript)
+                }
+                scheduleRestart()
+            }
+
+            override fun onError(error: Int) {
+                Log.d(TAG, "Command-capture error code=$error — nothing captured, resuming wake listening")
+                scheduleRestart()
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) { /* wait for final — command needs the whole sentence */ }
+            override fun onEndOfSpeech() { /* handled via onResults/onError */ }
+            override fun onBeginningOfSpeech() { /* no-op */ }
+            override fun onRmsChanged(rmsdB: Float) { /* no-op */ }
+            override fun onBufferReceived(buffer: ByteArray?) { /* no-op */ }
+            override fun onEvent(eventType: Int, params: Bundle?) { /* no-op */ }
+        })
+        r.startListening(commandCaptureIntent())
+        mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
     }
 
     private fun scheduleRestart() {
@@ -236,6 +289,15 @@ class WakeWordListener @Inject constructor(
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+        }
+
+    /** Same as [recognizerIntent] but with more silence tolerance — a follow-up command
+     *  sentence is longer than a two-letter wake word and shouldn't cut off mid-sentence. */
+    private fun commandCaptureIntent(): Intent =
+        recognizerIntent().apply {
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2000L)
         }
 
     companion object {

@@ -25,6 +25,66 @@ abhi sirf Chat tab khulta hai (`AssistantForegroundService.launchChatOnWake`). B
 nahi hai, isiliye upar wale 2 fix ke baad bhi "SA, volume kam karo" bolne se kuch nahi hoga jab
 tak wo part banaya na jaaye.
 
+## ⚠️ Addendum 2 — asli voice command loop (wake → command → execute → confirm)
+
+Pichhle addendum ke 2 bug fix ke baad bhi aapne saaf kaha: mic ki koi bhi awaaz nahi aani chahiye,
+background mein chup chaap sunta rahe, aur "SA ye karo" bol ke command real chalna chahiye, confirm
+ke saath — koi fake/dummy code nahi. Yeh is zip mein hai:
+
+- **`WakeWordListener` ab command bhi capture karta hai.** Pehle sirf "SA" match hone par chat tab
+  khul jaata tha — command wahin ruk jaata tha. Ab do real tareeke se command pakadta hai:
+  1. Ek hi saans mein bola gaya poora vaakya ("SA volume badha do") — `extractCommandAfterWake`
+     wake word ke baad ke saare words nikaal leta hai, seedha usi session se, koi extra beep/session
+     nahi.
+  2. Sirf "SA" bola aur ruk gaye — tab ek dedicated one-shot follow-up session khulta hai (zyada
+     silence-tolerance ke saath) jo agla bola hua poora command sunta hai.
+- **`AssistantForegroundService` ab us command ko real chalata hai** — bilkul waisi hi
+  `ChatRepository.sendMessage()` call jo typed message bhejta hai, phir Termux server ke jawab ka
+  wait karta hai (15s timeout), jawab mein agar `action` ho to `AutomationCommandExecutor` (Phase
+  4/5 ke wahi real controllers) se chala ke result `SaTextToSpeech` se bol deta hai — koi
+  MainActivity/chat screen khulne ki zaroorat nahi, sab background mein.
+- **`VoiceReplyDedupe`** (naya) yeh ensure karta hai ki agar Chat screen bhi khuli ho tab bhi ek hi
+  response do baar execute/bol na jaaye.
+- **Beep/mic sound minimize** — pichla `AudioManager` mute-trick dono naye recognizer sessions
+  (wake-loop + command-capture) par bhi lagta hai.
+
+**Honest limitation #1 (App-side hi poora sach):** Android ka public `SpeechRecognizer` ek system
+service (aam taur par Google app) use karta hai jiska apna start/stop "ding" hai — humara mute-trick
+zyada-tar devices par isse chhupa deta hai, lekin kuch OEM ROMs is tone ko kisi doosre audio stream
+par bhej sakte hain jo app se control nahi hota. 100% sunishchit "zero sound" sirf ek licensed
+offline keyword-spotting engine (jaise Porcupine — paid console + trained model file chahiye) se hi
+milta hai, jo is environment mein produce nahi kar sakta — pehle bhi yehi honest limitation likha
+gaya tha, ab bhi wahi sach hai.
+
+**Honest limitation #2 (server-side, is zip ke bahar):** `response.action` sirf tab aata hai jab
+Termux Python server khud "volume badhao" jaisi baat samajh ke `action`/`actionParams` bhejta hai.
+Wo server is Android zip ka hissa nahi hai — agar wo abhi tak yeh fields nahi bhej raha (Phase 4
+status report mein yehi bataya gaya tha), to bola hua command real bhejega aur real spoken jawab bhi
+aayega, bas on-device automation (volume/brightness/etc.) tab tak nahi chalega jab tak server-side
+yeh part update na ho.
+
+**Design decision (aapke ask ke mutabik):** wake word par ab `MainActivity` foreground mein
+NAHI aata — pehle Phase 6 Part 1 mein aata tha. Aapne "chup chaap background" maanga tha, isiliye
+yeh hata diya; sirf notification text aur spoken confirmation hi feedback hai.
+
+## ⚠️ Abhi bhi baaki — poster mein hai, kisi bhi zip mein nahi bana (fake nahi likhna chaha)
+
+- **WhatsApp / Instagram / YouTube automation, auto-click** — yeh Phase 5 (Accessibility
+  Automation) hai. Status report mein pehle se hi "Baaki" likha tha — kisi zip mein iska code
+  maujood nahi hai. Yeh per-app UI-tree navigation hai (`AccessibilityService` se), har app ki apni
+  screen-structure alag hoti hai aur real device par test kiye bina honestly "complete" nahi bol
+  sakta — isi wajah se ab tak shuru nahi kiya, taaki fake/half-baked na de du.
+- **Edge TTS (dusra/online TTS option jo poster mein tha)** — abhi sirf Android ka apna
+  built-in `TextToSpeech` engine use ho raha hai. "Edge TTS" Microsoft ka koi official public API
+  nahi hai — jo bhi open-source tools isse use karte hain wo ek unofficial, reverse-engineered
+  endpoint hit karte hain jo bina notice tute sakta hai / Microsoft ki terms ke against ho sakta hai.
+  Isliye maine khud se yeh silently nahi bana diya.
+
+Agla message mein bataiye: Phase 5 (WhatsApp/Instagram/YouTube automation) shuru karoon? Aur TTS
+ke liye — Edge TTS wahi risky/unofficial tareeke se chahiye, ya iske bajaye Android ke apne
+"extra voices download karo" (Settings > install voice data) flow ko wire karke ek real,
+sustainable "aur voices add karo + switch karo" feature banaun?
+
 ## Naya is zip mein: Phase 6 Part 2 — TTS (Voice Replies)
 
 Phase 6 Part 1 (pichle zip mein) ne "SA" wake word suna; ab Part 2 SA ko wapas

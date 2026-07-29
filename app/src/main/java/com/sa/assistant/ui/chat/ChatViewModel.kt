@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sa.assistant.core.automation.AutomationCommandExecutor
+import com.sa.assistant.core.assistant.VoiceReplyDedupe
 import com.sa.assistant.core.export.ChatPdfExporter
 import com.sa.assistant.core.files.AttachmentStorage
 import com.sa.assistant.core.tts.SaTextToSpeech
@@ -48,6 +49,7 @@ class ChatViewModel @Inject constructor(
     private val tts: SaTextToSpeech,
     private val ttsPreferences: TtsPreferences,
     private val automationExecutor: AutomationCommandExecutor,
+    private val voiceReplyDedupe: VoiceReplyDedupe,
     @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
@@ -95,7 +97,11 @@ class ChatViewModel @Inject constructor(
 
                 // Speak only once a reply is fully assembled (done=true) —
                 // never mid-stream, so SA doesn't read out partial chunks.
-                if (response.done) {
+                // claimSpeak guards against double-speaking a response that
+                // AssistantForegroundService's background voice pipeline
+                // already spoke (e.g. this same reply came from a wake-word
+                // command while the Chat screen also happened to be open).
+                if (response.done && voiceReplyDedupe.claimSpeak(response.id)) {
                     val finalMessage = updated.lastOrNull { it.id == response.id && !it.isFromUser }
                     if (finalMessage != null) speakIfEnabled(finalMessage.text)
                 }
@@ -103,8 +109,9 @@ class ChatViewModel @Inject constructor(
                 // Real "voice command -> real automation" bridge: only once the
                 // reply is fully assembled, and only if the server actually
                 // attached an action (older/plain servers never do, so this
-                // is a no-op for them).
-                if (response.done && response.action != null) {
+                // is a no-op for them). claimAction guards against running the
+                // same action twice for the same reason as claimSpeak above.
+                if (response.done && response.action != null && voiceReplyDedupe.claimAction(response.id)) {
                     runAutomationAction(response.action, response.actionParams)
                 }
             }
@@ -121,6 +128,7 @@ class ChatViewModel @Inject constructor(
                 isFromUser = false
             )
         )
+        speakIfEnabled(outcome.message)
         outcome.followUpIntent?.let { intent ->
             _events.trySend(ChatUiEvent.LaunchSystemIntent(intent))
         }
