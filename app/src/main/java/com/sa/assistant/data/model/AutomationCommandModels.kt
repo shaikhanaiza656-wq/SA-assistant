@@ -13,6 +13,13 @@ package com.sa.assistant.data.model
  * [AutomationCommand.Unknown] so a server typo or a future action this
  * build doesn't know about yet fails loudly in chat ("SA ye command
  * abhi nahi samajhti") instead of crashing or being silently ignored.
+ *
+ * Recognised wire action strings: `volume_set`, `brightness_set`,
+ * `flashlight_on`/`off`/`toggle`, `music_play_pause`/`next`/`previous`,
+ * `bluetooth_on`/`off`, `app_launch`, `whatsapp_send` (params: contact,
+ * message), `instagram_like`, `youtube_search` (params: query), and
+ * `autoclick_tap` (params: text) — the last four map onto the Phase 5
+ * accessibility automations.
  */
 sealed class AutomationCommand {
     data class VolumeSet(val stream: VolumeStream, val percent: Int) : AutomationCommand()
@@ -22,6 +29,19 @@ sealed class AutomationCommand {
     data class MusicSend(val action: MediaAction) : AutomationCommand()
     data class BluetoothSet(val on: Boolean) : AutomationCommand()
     data class AppLaunch(val packageName: String) : AutomationCommand()
+
+    // Phase 5 bridge: same real WhatsApp/Instagram/YouTube/AutoClick
+    // automations that ToolsScreen already drives from manual taps
+    // (core/automation/social/* and AutoClickController) — these four
+    // cases route the exact same suspend functions through this
+    // voice/chat command loop instead of requiring the user to open the
+    // Tools tab and press a button.
+    data class WhatsAppSend(val contact: String, val message: String) : AutomationCommand()
+    data object InstagramLike : AutomationCommand()
+    data class YouTubeSearch(val query: String) : AutomationCommand()
+    /** Generic "tap whatever on screen right now matches this text" — not scoped to one app. */
+    data class AutoClickTap(val text: String) : AutomationCommand()
+
     data class Unknown(val rawAction: String) : AutomationCommand()
 
     companion object {
@@ -50,6 +70,21 @@ sealed class AutomationCommand {
                 "app_launch" -> {
                     val pkg = params["package"]
                     if (pkg.isNullOrBlank()) Unknown(action) else AppLaunch(pkg)
+                }
+                "whatsapp_send" -> {
+                    val contact = params["contact"]
+                    val message = params["message"]
+                    if (contact.isNullOrBlank() || message.isNullOrBlank()) Unknown(action)
+                    else WhatsAppSend(contact, message)
+                }
+                "instagram_like" -> InstagramLike
+                "youtube_search" -> {
+                    val query = params["query"]
+                    if (query.isNullOrBlank()) Unknown(action) else YouTubeSearch(query)
+                }
+                "autoclick_tap" -> {
+                    val text = params["text"]
+                    if (text.isNullOrBlank()) Unknown(action) else AutoClickTap(text)
                 }
                 else -> Unknown(action)
             }

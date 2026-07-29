@@ -12,6 +12,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -88,13 +89,16 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 wakePhrase = state.wakePhrase,
                 isEnabled = state.isWakeWordEnabled,
                 wakeWordState = state.wakeWordState,
+                porcupineAccessKey = state.porcupineAccessKey,
                 onToggle = { checked ->
                     if (checked && !micPermissionState.status.isGranted) {
                         micPermissionState.launchPermissionRequest()
                     } else {
                         viewModel.setWakeWordEnabled(checked)
                     }
-                }
+                },
+                onSaveAccessKey = viewModel::setPorcupineAccessKey,
+                onRequestBatteryExemption = viewModel::requestBatteryOptimizationExemption
             )
 
             TtsCard(
@@ -120,8 +124,13 @@ private fun WakeWordCard(
     wakePhrase: String,
     isEnabled: Boolean,
     wakeWordState: WakeWordState,
-    onToggle: (Boolean) -> Unit
+    porcupineAccessKey: String?,
+    onToggle: (Boolean) -> Unit,
+    onSaveAccessKey: (String) -> Unit,
+    onRequestBatteryExemption: () -> Unit
 ) {
+    var accessKeyText by remember(porcupineAccessKey) { mutableStateOf(porcupineAccessKey.orEmpty()) }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
@@ -140,6 +149,35 @@ private fun WakeWordCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            if (wakeWordState == WakeWordState.PORCUPINE_NOT_CONFIGURED || isEnabled) {
+                Text(
+                    "Always-on \"SA\" spotting (Porcupine): apna free AccessKey console.picovoice.ai se paste karo. " +
+                        "Custom \"SA\" keyword file (.ppn) bhi wahin train karke assets/porcupine/ mein daalo.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = accessKeyText,
+                        onValueChange = { accessKeyText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Picovoice AccessKey") },
+                        singleLine = true
+                    )
+                }
+                Button(onClick = { onSaveAccessKey(accessKeyText) }) {
+                    Text("Save AccessKey")
+                }
+            }
+
+            OutlinedButton(onClick = onRequestBatteryExemption) {
+                Text("Battery optimization se SA ko exempt karo")
+            }
         }
     }
 }
@@ -147,10 +185,12 @@ private fun WakeWordCard(
 private fun wakeWordStatusText(isEnabled: Boolean, state: WakeWordState): String {
     if (!isEnabled) return "Off — background mein \"SA\" ke liye sun nahi raha."
     return when (state) {
+        WakeWordState.SPOTTING -> "Chalu hai (Porcupine, always-on) — background mein \"SA\" sun raha hai."
         WakeWordState.LISTENING -> "Chalu hai — background mein \"SA\" sun raha hai."
         WakeWordState.CAPTURING_COMMAND -> "\"SA\" sun liya — ab command bolo."
         WakeWordState.MIC_PERMISSION_REQUIRED -> "Microphone permission chahiye — abhi sun nahi paa raha."
         WakeWordState.RECOGNIZER_UNAVAILABLE -> "Is device par koi speech recognizer nahi mila — sun nahi paa raha."
+        WakeWordState.PORCUPINE_NOT_CONFIGURED -> "Chalu hai (fallback mode) — Picovoice AccessKey add karo behtar always-on ke liye."
         WakeWordState.ERROR -> "Listener restart ho raha hai (network ya recognizer glitch)."
         WakeWordState.IDLE -> "On ho raha hai..."
     }

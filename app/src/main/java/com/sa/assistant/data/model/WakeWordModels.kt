@@ -22,7 +22,19 @@ enum class WakeWordState {
     RECOGNIZER_UNAVAILABLE,
 
     /** A recognizer session errored (network, no-match timeout, etc.) and a restart is pending. */
-    ERROR
+    ERROR,
+
+    /** Porcupine ("SA") is running and actively spotting for the wake word — the real,
+     *  always-on, low-power path. Distinct from [LISTENING], which is the legacy
+     *  SpeechRecognizer-loop fallback used only when Porcupine isn't configured yet. */
+    SPOTTING,
+
+    /** No Porcupine AccessKey / trained "SA" keyword file has been supplied yet
+     *  (see [com.sa.assistant.core.wakeword.WakeWordPreferences]). Wake-word
+     *  detection is still working via the honest SpeechRecognizer-loop
+     *  fallback, but battery/always-on behavior won't be as good as Porcupine
+     *  until real Picovoice credentials are added. */
+    PORCUPINE_NOT_CONFIGURED
 }
 
 /** The wake word the user asked for. Kept as a real, named default rather than an arbitrary placeholder. */

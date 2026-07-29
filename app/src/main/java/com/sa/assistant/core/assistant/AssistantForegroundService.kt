@@ -3,9 +3,11 @@ package com.sa.assistant.core.assistant
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.sa.assistant.R
 import com.sa.assistant.SaApplication
@@ -84,10 +86,12 @@ class AssistantForegroundService : Service() {
     private var stateJob: Job? = null
     private var ttsCoordinationJob: Job? = null
     private var commandCapturedJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification("SA is listening for you"))
+        acquireWakeLock()
         socketClient.start()
 
         preferencesJob = scope.launch {
@@ -148,7 +152,35 @@ class AssistantForegroundService : Service() {
         commandCapturedJob?.cancel()
         wakeWordListener.stop()
         socketClient.stop()
+        releaseWakeLock()
         super.onDestroy()
+    }
+
+    /**
+     * Real [PowerManager.PARTIAL_WAKE_LOCK], held only while this foreground
+     * service is alive — keeps the CPU (not the screen) running so Porcupine's
+     * continuous audio pipeline and the socket connection keep working with
+     * the screen off/locked. Auto-timeout is a real safety net (10h, renewed
+     * every time the service restarts) so a crash can't pin it forever; the
+     * matching [releaseWakeLock] call in [onDestroy] is the normal path.
+     * Actual Doze/App-Standby exemption (so Android doesn't throttle this
+     * service at all) is a separate, user-consented step — see
+     * SettingsViewModel.requestBatteryOptimizationExemption().
+     */
+    private fun acquireWakeLock() {
+        if (wakeLock != null) return
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        wakeLock = runCatching {
+            powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SA:wakeWordService").apply {
+                setReferenceCounted(false)
+                acquire(WAKE_LOCK_TIMEOUT_MS)
+            }
+        }.getOrNull()
+    }
+
+    private fun releaseWakeLock() {
+        runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+        wakeLock = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -188,10 +220,12 @@ class AssistantForegroundService : Service() {
 
     private fun updateNotification(state: WakeWordState, overrideText: String? = null) {
         val text = overrideText ?: when (state) {
+            WakeWordState.SPOTTING -> "SA is listening for \"SA\""
             WakeWordState.LISTENING -> "SA is listening for you"
             WakeWordState.CAPTURING_COMMAND -> "SA: sun raha hoon, bolo..."
             WakeWordState.MIC_PERMISSION_REQUIRED -> "SA: mic permission needed for wake word"
             WakeWordState.RECOGNIZER_UNAVAILABLE -> "SA: no speech recognizer on this device"
+            WakeWordState.PORCUPINE_NOT_CONFIGURED -> "SA: add Picovoice AccessKey in Settings for always-on wake word"
             WakeWordState.ERROR -> "SA is reconnecting its wake-word listener..."
             WakeWordState.IDLE -> "SA is running in the background"
         }
@@ -217,5 +251,6 @@ class AssistantForegroundService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 42
         private const val SERVER_REPLY_TIMEOUT_MS = 15_000L
+        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 60 * 1000L // 10h safety cap, not "forever"
     }
 }

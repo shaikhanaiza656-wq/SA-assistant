@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sa.assistant.core.accessibility.AccessibilityPermissionHelper
 import com.sa.assistant.core.automation.AppLauncherController
+import com.sa.assistant.core.automation.AutoClickController
 import com.sa.assistant.core.automation.BluetoothController
 import com.sa.assistant.core.automation.BrightnessController
 import com.sa.assistant.core.automation.FlashlightController
@@ -66,7 +67,8 @@ data class AutomationUiState(
     val isRunning: Boolean = false,
     val whatsappContact: String = "",
     val whatsappMessage: String = "",
-    val youtubeQuery: String = ""
+    val youtubeQuery: String = "",
+    val autoClickText: String = ""
 )
 
 /**
@@ -111,7 +113,8 @@ class ToolsViewModel @Inject constructor(
     private val accessibilityPermissionHelper: AccessibilityPermissionHelper,
     private val whatsAppAutomation: WhatsAppAutomation,
     private val instagramAutomation: InstagramAutomation,
-    private val youTubeAutomation: YouTubeAutomation
+    private val youTubeAutomation: YouTubeAutomation,
+    private val autoClickController: AutoClickController
 ) : ViewModel() {
 
     private val _volumeLevels = MutableStateFlow(volumeController.allLevels())
@@ -307,7 +310,7 @@ class ToolsViewModel @Inject constructor(
         events.trySend(
             ToolsUiEvent.LaunchSystemIntent(
                 intent = accessibilityPermissionHelper.openAccessibilitySettings(),
-                reason = "SA ko Accessibility list mein dhoondo aur on karo, tabhi WhatsApp/Instagram/YouTube automation kaam karega."
+                reason = "SA ko Accessibility list mein dhoondo aur on karo, tabhi WhatsApp/Instagram/YouTube/AutoClick automation kaam karega."
             )
         )
     }
@@ -322,6 +325,10 @@ class ToolsViewModel @Inject constructor(
 
     fun onYoutubeQueryChange(value: String) {
         _automationState.update { it.copy(youtubeQuery = value) }
+    }
+
+    fun onAutoClickTextChange(value: String) {
+        _automationState.update { it.copy(autoClickText = value) }
     }
 
     fun sendWhatsAppMessage() {
@@ -345,6 +352,16 @@ class ToolsViewModel @Inject constructor(
             return
         }
         runAutomation { youTubeAutomation.searchAndPlay(query) }
+    }
+
+    /** Real "tap whatever matches this text on the current screen" — not scoped to any one app. */
+    fun runAutoClick() {
+        val text = _automationState.value.autoClickText.trim()
+        if (text.isEmpty()) {
+            events.trySend(ToolsUiEvent.Info("Pehle bharo ki kya click karna hai (jo text screen par dikhta hai)."))
+            return
+        }
+        runAutomation { autoClickController.tap(text) }
     }
 
     private fun runAutomation(block: suspend () -> AutomationResult) {

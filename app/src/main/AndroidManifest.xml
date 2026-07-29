@@ -13,6 +13,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Phase 6 Part 3: lets AssistantForegroundService ask the user (via a
+         real system dialog — Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+         see SettingsViewModel.requestBatteryOptimizationExemption) to stop
+         Doze/App-Standby from suspending the always-on wake-word mic. This
+         is a normal-protection-level permission; nothing is granted
+         silently. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Phase 2: AI Chat needs the camera for in-chat photo capture, and
          the app declares a <queries> intent so it can verify a camera app

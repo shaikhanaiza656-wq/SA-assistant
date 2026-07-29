@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,63 +18,86 @@ import com.sa.assistant.data.model.WakeWordState
 import com.sa.assistant.data.model.extractCommandAfterWake
 import com.sa.assistant.data.model.matchesWakePhrase
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Real, continuous "Hey SA"-style wake-word listener. This is NOT a keyword-
- * spotting model (Porcupine/ONNX) trained offline for the single word "SA" —
- * building one requires a licensed console + a trained model file, which
- * can't be produced honestly in this environment. Instead this drives
- * Android's own [SpeechRecognizer] in a loop: each session transcribes
- * whatever is said, [android.speech.RecognitionListener.onResults]/[onError]
- * fires, and — unless [stop] was called — a new session starts right after.
- * [com.sa.assistant.data.model.matchesWakePhrase] checks every transcript
- * against [DEFAULT_WAKE_PHRASE] ("SA").
+ * Wake-word listener for "SA". Two real spotting paths, chosen automatically:
  *
- * Honest limitation: [SpeechRecognizer] needs a speech-recognition service
- * to be present on the device (normally the Google app) and, on most
- * devices, an internet connection unless the user has downloaded an offline
- * language pack in Android's own Settings > System > Languages > On-device
- * recognition. If neither is available, [state] goes to
- * [WakeWordState.RECOGNIZER_UNAVAILABLE] and this class does not pretend to
- * be listening.
+ * 1. **Porcupine** ([PorcupineWakeWordEngine]) — the real always-on path.
+ *    Runs continuously with no SpeechRecognizer restart loop and no network
+ *    dependency, exactly like any commercial always-on assistant. Requires
+ *    the user's own Picovoice AccessKey + a custom "SA" keyword file trained
+ *    in Picovoice Console (see [PorcupineWakeWordEngine] kdoc) — this is a
+ *    one-time, free, ~2-minute setup this code can't do on someone's behalf,
+ *    because a "SA" keyword model can only honestly come from Picovoice's
+ *    own trainer.
+ * 2. **Legacy SpeechRecognizer loop** — used automatically only until #1 is
+ *    configured, so wake-word detection never silently stops working. Once
+ *    Porcupine credentials are added in Settings this path is not used.
  *
- * Must be started/stopped from a thread with a [Looper] — [start]/[stop]
- * post through [mainHandler] so callers (the foreground service) never need
- * to worry about this.
+ * Either way, once the wake word fires, exactly one dedicated
+ * [SpeechRecognizer] session opens once to capture the actual command (or
+ * the remainder is reused if it was said in the same breath as "SA") — this
+ * one-shot session is never in a restart loop. [MicArbiter] guarantees
+ * Porcupine and that session are never both holding the mic.
  */
 @Singleton
 class WakeWordListener @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val porcupineEngine: PorcupineWakeWordEngine,
+    private val micArbiter: MicArbiter,
+    private val wakeWordPreferences: WakeWordPreferences
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val audioManager: AudioManager? =
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private val prefsScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     private var recognizer: SpeechRecognizer? = null
     private var isRunning = false
     private var currentWakePhrase = DEFAULT_WAKE_PHRASE
-
-    // --- Fix 1: don't listen to our own TTS voice ---
-    // While SA is speaking (TTS), the recognizer must be fully torn down —
-    // otherwise it hears SA's own playback through the mic and can
-    // false-trigger or spam restarts. AssistantForegroundService calls
-    // pauseForSpeech()/resumeAfterSpeech() around TTS start/stop.
     private var isPausedForSpeech = false
+    private var usingPorcupine = false
 
-    // --- Fix 2: silence the recognizer's start/stop beep ---
-    // Every SpeechRecognizer session plays a system "ding" on start and
-    // stop. With a session restarting every ~400ms this became a constant
-    // beeping loop. We briefly mute STREAM_MUSIC (where the beep plays)
-    // around each start/stop transition. Ref-counted so overlapping
-    // mute/unmute calls (start right after a stop) can't cancel each other out.
+    // Cached from WakeWordPreferences so start()/restart logic never has to
+    // block the main thread on a suspend read.
+    @Volatile private var cachedAccessKey: String = ""
+    @Volatile private var cachedKeywordAsset: String = WakeWordPreferences.DEFAULT_KEYWORD_ASSET
+
+    init {
+        prefsScope.launch {
+            combine(wakeWordPreferences.porcupineAccessKey, wakeWordPreferences.porcupineKeywordAsset) { key, asset ->
+                key.orEmpty() to asset
+            }.collect { (key, asset) ->
+                val credentialsChanged = key != cachedAccessKey || asset != cachedKeywordAsset
+                cachedAccessKey = key
+                cachedKeywordAsset = asset
+                // If the user just pasted valid credentials while already running
+                // on the legacy fallback, hot-swap to Porcupine without needing a
+                // manual toggle-off/on.
+                if (credentialsChanged && isRunning && !usingPorcupine && !isPausedForSpeech) {
+                    stopLegacyRecognizer()
+                    startSpottingPreferPorcupine()
+                }
+            }
+        }
+    }
+
+    // --- Fix: silence the recognizer's start/stop beep on the legacy path/
+    // command-capture session (Porcupine has no such beep at all). ---
     private var muteDepth = 0
     private fun muteBeep() {
         if (muteDepth == 0) {
@@ -93,22 +117,16 @@ class WakeWordListener @Inject constructor(
     val state: StateFlow<WakeWordState> = _state.asStateFlow()
 
     private val wakeEvents = Channel<Unit>(Channel.CONFLATED)
-    /** Emits once each time [currentWakePhrase] is heard. Conflated: a caller that's slow to
-     *  react won't build up a backlog of stale triggers. */
+    /** Emits once each time the wake word is heard. Conflated: a slow-reacting caller
+     *  won't build up a backlog of stale triggers. */
     val wakeDetected: Flow<Unit> = wakeEvents.receiveAsFlow()
 
     private val commandEvents = Channel<String>(Channel.BUFFERED)
-    /**
-     * Emits the actual spoken command text once it's been captured — either
-     * extracted from the same breath as the wake word ("SA volume badha
-     * do") or from the dedicated one-shot follow-up session that opens when
-     * the user says just "SA" and pauses. The caller (AssistantForegroundService)
-     * sends this text through the normal chat pipeline, same as if it had
-     * been typed.
-     */
+    /** Emits the spoken command text once captured. The caller (AssistantForegroundService)
+     *  sends this through the normal chat pipeline, same as a typed message. */
     val commandCaptured: Flow<String> = commandEvents.receiveAsFlow()
 
-    /** Starts (or restarts, if the phrase changed) continuous listening for [wakePhrase]. Safe to call repeatedly. */
+    /** Starts (or restarts, if the phrase changed) wake-word listening. Safe to call repeatedly. */
     fun start(wakePhrase: String = DEFAULT_WAKE_PHRASE) {
         mainHandler.post {
             currentWakePhrase = wakePhrase
@@ -120,36 +138,28 @@ class WakeWordListener @Inject constructor(
                 _state.value = WakeWordState.MIC_PERMISSION_REQUIRED
                 return@post
             }
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                _state.value = WakeWordState.RECOGNIZER_UNAVAILABLE
-                return@post
-            }
 
             isRunning = true
-            createRecognizerAndListen()
+            startSpottingPreferPorcupine()
         }
     }
 
-    /** Stops listening and releases the recognizer. Safe to call even if not running. */
+    /** Stops listening entirely and releases every mic resource. Safe to call even if not running. */
     fun stop() {
         mainHandler.post {
             isRunning = false
             isPausedForSpeech = false
             mainHandler.removeCallbacksAndMessages(RESTART_TOKEN)
-            muteBeep()
-            recognizer?.let {
-                it.stopListening()
-                it.destroy()
-            }
-            recognizer = null
+            porcupineEngine.stop()
+            stopLegacyRecognizer()
+            usingPorcupine = false
             _state.value = WakeWordState.IDLE
-            mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
         }
     }
 
     /**
-     * Tears the recognizer down without touching [isRunning] or the user's
-     * enabled-preference — call right before [SaTextToSpeech] starts
+     * Tears the active mic path down without touching [isRunning] — call
+     * right before [com.sa.assistant.core.tts.SaTextToSpeech] starts
      * speaking so the mic can't hear SA's own voice. Pairs with
      * [resumeAfterSpeech]. Safe to call repeatedly / when not running.
      */
@@ -157,15 +167,13 @@ class WakeWordListener @Inject constructor(
         mainHandler.post {
             if (!isRunning || isPausedForSpeech) return@post
             isPausedForSpeech = true
-            mainHandler.removeCallbacksAndMessages(RESTART_TOKEN)
-            muteBeep()
-            recognizer?.let {
-                it.stopListening()
-                it.destroy()
+            if (usingPorcupine) {
+                porcupineEngine.pauseForOtherMicUse()
+            } else {
+                mainHandler.removeCallbacksAndMessages(RESTART_TOKEN)
+                stopLegacyRecognizer()
             }
-            recognizer = null
             _state.value = WakeWordState.IDLE
-            mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
         }
     }
 
@@ -174,11 +182,62 @@ class WakeWordListener @Inject constructor(
         mainHandler.post {
             if (!isRunning || !isPausedForSpeech) return@post
             isPausedForSpeech = false
-            createRecognizerAndListen()
+            if (usingPorcupine) {
+                porcupineEngine.resume()
+                _state.value = WakeWordState.SPOTTING
+            } else {
+                createRecognizerAndListen()
+            }
         }
     }
 
+    // --- Spotting path selection -------------------------------------------------
+
+    private fun startSpottingPreferPorcupine() {
+        try {
+            porcupineEngine.start(cachedAccessKey, cachedKeywordAsset) {
+                // Fires on Porcupine's own callback thread — hop back to main
+                // before touching anything else (mic, UI state, recognizer).
+                mainHandler.post { onWakeSpotted() }
+            }
+            usingPorcupine = true
+            _state.value = WakeWordState.SPOTTING
+        } catch (e: PorcupineWakeWordEngine.PorcupineUnavailable) {
+            Log.i(TAG, "Porcupine not usable yet (${e.message}) - using SpeechRecognizer-loop fallback")
+            usingPorcupine = false
+            _state.value = WakeWordState.PORCUPINE_NOT_CONFIGURED
+            if (micArbiter.acquire(MicArbiter.Owner.SPEECH_RECOGNIZER)) {
+                if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                    _state.value = WakeWordState.RECOGNIZER_UNAVAILABLE
+                    micArbiter.release(MicArbiter.Owner.SPEECH_RECOGNIZER)
+                    return
+                }
+                createRecognizerAndListen()
+            }
+        }
+    }
+
+    private fun onWakeSpotted() {
+        if (!isRunning) return
+        Log.d(TAG, "Wake word spotted (Porcupine)")
+        playActivationSound()
+        wakeEvents.trySend(Unit)
+        porcupineEngine.pauseForOtherMicUse()
+        startCommandCaptureSession()
+    }
+
+    private fun playActivationSound() {
+        runCatching {
+            val tone = ToneGenerator(AudioManager.STREAM_MUSIC, ACTIVATION_TONE_VOLUME)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP, ACTIVATION_TONE_MS)
+            mainHandler.postDelayed({ runCatching { tone.release() } }, (ACTIVATION_TONE_MS + 50).toLong())
+        }
+    }
+
+    // --- Legacy SpeechRecognizer-loop fallback (only used pre-Porcupine-setup) ---
+
     private fun createRecognizerAndListen() {
+        if (!micArbiter.acquire(MicArbiter.Owner.SPEECH_RECOGNIZER)) return
         muteBeep()
         val r = SpeechRecognizer.createSpeechRecognizer(context)
         recognizer = r
@@ -191,27 +250,23 @@ class WakeWordListener @Inject constructor(
                 val transcripts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
                 val matchedTranscript = transcripts.firstOrNull { matchesWakePhrase(it, currentWakePhrase) }
                 if (matchedTranscript == null) {
-                    scheduleRestart()
+                    scheduleLegacyRestart()
                     return
                 }
-                Log.d(TAG, "Wake phrase matched")
+                Log.d(TAG, "Wake phrase matched (legacy fallback)")
                 wakeEvents.trySend(Unit)
+                playActivationSound()
                 val remainder = extractCommandAfterWake(matchedTranscript, currentWakePhrase)
+                stopLegacyRecognizer()
                 if (remainder != null) {
-                    // "SA volume badha do" said in one breath — no follow-up needed.
                     commandEvents.trySend(remainder)
-                    scheduleRestart()
+                    scheduleLegacyRestart()
                 } else {
-                    // Just "SA" alone — open a dedicated one-shot session for the command.
                     startCommandCaptureSession()
                 }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                // A wake word doesn't need to wait for a full silence-terminated
-                // result — checking partials makes detection feel instant. We
-                // still let onResults do the actual command-extraction/capture
-                // decision once this session finalizes below.
                 val transcripts = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
                 if (transcripts.any { matchesWakePhrase(it, currentWakePhrase) }) {
                     r.stopListening()
@@ -219,9 +274,9 @@ class WakeWordListener @Inject constructor(
             }
 
             override fun onError(error: Int) {
-                Log.d(TAG, "Recognizer error code=$error — will restart listening")
+                Log.d(TAG, "Recognizer error code=$error - will restart listening")
                 _state.value = WakeWordState.ERROR
-                scheduleRestart()
+                scheduleLegacyRestart()
             }
 
             override fun onEndOfSpeech() { /* handled via onResults/onError */ }
@@ -234,8 +289,40 @@ class WakeWordListener @Inject constructor(
         mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
     }
 
-    /** One-shot session dedicated to capturing the command after a bare "SA" (no follow-up words yet). */
+    private fun stopLegacyRecognizer() {
+        muteBeep()
+        recognizer?.let {
+            runCatching { it.stopListening() }
+            runCatching { it.destroy() }
+        }
+        recognizer = null
+        micArbiter.release(MicArbiter.Owner.SPEECH_RECOGNIZER)
+        mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
+    }
+
+    private fun scheduleLegacyRestart() {
+        stopLegacyRecognizer()
+        if (!isRunning || isPausedForSpeech || usingPorcupine) return
+        // Short delay avoids hammering the recognizer service in a tight loop
+        // when it errors out repeatedly (e.g. no network) - this is the
+        // fallback path only; Porcupine (once configured) never restarts a loop.
+        mainHandler.postAtTime(
+            { if (isRunning && !isPausedForSpeech && !usingPorcupine) createRecognizerAndListen() },
+            RESTART_TOKEN,
+            android.os.SystemClock.uptimeMillis() + RESTART_DELAY_MS
+        )
+    }
+
+    // --- One-shot command capture, shared by both spotting paths -----------------
+
+    /** Opens the mic exactly once to capture the command that follows the wake word. */
     private fun startCommandCaptureSession() {
+        if (!micArbiter.acquire(MicArbiter.Owner.SPEECH_RECOGNIZER)) {
+            // Mic somehow still held (shouldn't happen - Porcupine/legacy both
+            // release before calling this) - resume spotting rather than getting stuck.
+            resumeSpottingAfterCommandCapture()
+            return
+        }
         muteBeep()
         _state.value = WakeWordState.CAPTURING_COMMAND
         val r = SpeechRecognizer.createSpeechRecognizer(context)
@@ -249,15 +336,15 @@ class WakeWordListener @Inject constructor(
                 if (!transcript.isNullOrEmpty()) {
                     commandEvents.trySend(transcript)
                 }
-                scheduleRestart()
+                finishCommandCapture()
             }
 
             override fun onError(error: Int) {
-                Log.d(TAG, "Command-capture error code=$error — nothing captured, resuming wake listening")
-                scheduleRestart()
+                Log.d(TAG, "Command-capture error code=$error - nothing captured, resuming wake spotting")
+                finishCommandCapture()
             }
 
-            override fun onPartialResults(partialResults: Bundle?) { /* wait for final — command needs the whole sentence */ }
+            override fun onPartialResults(partialResults: Bundle?) { /* wait for final - command needs the whole sentence */ }
             override fun onEndOfSpeech() { /* handled via onResults/onError */ }
             override fun onBeginningOfSpeech() { /* no-op */ }
             override fun onRmsChanged(rmsdB: Float) { /* no-op */ }
@@ -268,19 +355,26 @@ class WakeWordListener @Inject constructor(
         mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
     }
 
-    private fun scheduleRestart() {
+    private fun finishCommandCapture() {
         muteBeep()
-        recognizer?.destroy()
+        recognizer?.let {
+            runCatching { it.stopListening() }
+            runCatching { it.destroy() }
+        }
         recognizer = null
+        micArbiter.release(MicArbiter.Owner.SPEECH_RECOGNIZER)
         mainHandler.postDelayed({ unmuteBeep() }, BEEP_MUTE_MS)
+        resumeSpottingAfterCommandCapture()
+    }
+
+    private fun resumeSpottingAfterCommandCapture() {
         if (!isRunning || isPausedForSpeech) return
-        // A short delay avoids hammering the recognizer service in a tight
-        // loop when it errors out repeatedly (e.g. no network).
-        mainHandler.postAtTime(
-            { if (isRunning && !isPausedForSpeech) createRecognizerAndListen() },
-            RESTART_TOKEN,
-            android.os.SystemClock.uptimeMillis() + RESTART_DELAY_MS
-        )
+        if (usingPorcupine) {
+            porcupineEngine.resume()
+            _state.value = WakeWordState.SPOTTING
+        } else {
+            scheduleLegacyRestart()
+        }
     }
 
     private fun recognizerIntent(): Intent =
@@ -291,7 +385,7 @@ class WakeWordListener @Inject constructor(
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
         }
 
-    /** Same as [recognizerIntent] but with more silence tolerance — a follow-up command
+    /** Same as [recognizerIntent] but with more silence tolerance - a follow-up command
      *  sentence is longer than a two-letter wake word and shouldn't cut off mid-sentence. */
     private fun commandCaptureIntent(): Intent =
         recognizerIntent().apply {
@@ -304,6 +398,8 @@ class WakeWordListener @Inject constructor(
         private const val TAG = "WakeWordListener"
         private const val RESTART_DELAY_MS = 400L
         private const val BEEP_MUTE_MS = 250L
+        private const val ACTIVATION_TONE_MS = 120
+        private const val ACTIVATION_TONE_VOLUME = 60
         private val RESTART_TOKEN = Any()
     }
 }

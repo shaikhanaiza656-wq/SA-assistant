@@ -1,7 +1,12 @@
 package com.sa.assistant.ui.settings
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -26,6 +31,13 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+private data class WakeWordCombined(
+    val enabled: Boolean,
+    val phrase: String,
+    val listenerState: WakeWordState,
+    val porcupineAccessKey: String?
+)
+
 data class SettingsUiState(
     val isWakeWordEnabled: Boolean = false,
     val wakePhrase: String = "SA",
@@ -36,7 +48,8 @@ data class SettingsUiState(
     val ttsVoices: List<TtsVoiceOption> = emptyList(),
     val ttsSelectedVoiceName: String? = null,
     val ttsRate: Float = TTS_DEFAULT_RATE,
-    val ttsPitch: Float = TTS_DEFAULT_PITCH
+    val ttsPitch: Float = TTS_DEFAULT_PITCH,
+    val porcupineAccessKey: String? = null
 )
 
 /**
@@ -63,8 +76,9 @@ class SettingsViewModel @Inject constructor(
     private val wakeWordFlow = combine(
         wakeWordPreferences.isEnabled,
         wakeWordPreferences.wakePhrase,
-        wakeWordListener.state
-    ) { enabled, phrase, listenerState -> Triple(enabled, phrase, listenerState) }
+        wakeWordListener.state,
+        wakeWordPreferences.porcupineAccessKey
+    ) { enabled, phrase, listenerState, accessKey -> WakeWordCombined(enabled, phrase, listenerState, accessKey) }
 
     private val ttsFlow = combine(
         ttsPreferences.snapshot,
@@ -73,19 +87,19 @@ class SettingsViewModel @Inject constructor(
     ) { snapshot, engineState, voices -> Triple(snapshot, engineState, voices) }
 
     val uiState: StateFlow<SettingsUiState> = combine(wakeWordFlow, ttsFlow) { wake, ttsCombined ->
-        val (enabled, phrase, listenerState) = wake
         val (snapshot, engineState, voices) = ttsCombined
         SettingsUiState(
-            isWakeWordEnabled = enabled,
-            wakePhrase = phrase,
-            wakeWordState = listenerState,
+            isWakeWordEnabled = wake.enabled,
+            wakePhrase = wake.phrase,
+            wakeWordState = wake.listenerState,
             hasMicPermission = hasRecordAudioPermission(),
             isTtsEnabled = snapshot.isEnabled,
             ttsEngineState = engineState,
             ttsVoices = voices,
             ttsSelectedVoiceName = snapshot.voiceName,
             ttsRate = snapshot.speechRate,
-            ttsPitch = snapshot.pitch
+            ttsPitch = snapshot.pitch,
+            porcupineAccessKey = wake.porcupineAccessKey
         )
     }.stateIn(
         scope = viewModelScope,
@@ -114,6 +128,34 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             wakeWordPreferences.setEnabled(enabled)
         }
+    }
+
+    // --- Wake word (Porcupine) --------------------------------------------
+
+    fun setPorcupineAccessKey(accessKey: String) {
+        viewModelScope.launch { wakeWordPreferences.setPorcupineAccessKey(accessKey) }
+    }
+
+    /**
+     * Sends the user to the real system dialog
+     * (Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS) so Doze/App
+     * Standby stops throttling the always-on wake-word service. Nothing is
+     * granted silently — this only opens the OS's own consent screen.
+     */
+    fun requestBatteryOptimizationExemption() {
+        val context = getApplication<Application>()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        if (powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+            events.trySend(SettingsUiEvent.Info("Battery optimization already off SA ke liye."))
+            return
+        }
+        val intent = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:${context.packageName}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(intent) }
+            .onFailure { events.trySend(SettingsUiEvent.Info("Battery settings nahi khul paayi.")) }
     }
 
     // --- TTS -------------------------------------------------------------

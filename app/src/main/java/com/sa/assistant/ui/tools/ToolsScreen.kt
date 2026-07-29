@@ -228,7 +228,7 @@ fun ToolsScreen(viewModel: ToolsViewModel = hiltViewModel()) {
 
             item { Divider() }
 
-            item { SectionTitle("Automation (WhatsApp / Instagram / YouTube)") }
+            item { SectionTitle("Automation (WhatsApp / Instagram / YouTube / AutoClick)") }
             item {
                 AccessibilityPermissionCard(
                     isEnabled = automationState.isAccessibilityEnabled,
@@ -260,6 +260,15 @@ fun ToolsScreen(viewModel: ToolsViewModel = hiltViewModel()) {
                     isRunning = automationState.isRunning,
                     onQueryChange = viewModel::onYoutubeQueryChange,
                     onPlay = { viewModel.playYoutubeSearch() }
+                )
+            }
+            item {
+                AutoClickCard(
+                    text = automationState.autoClickText,
+                    enabled = automationState.isAccessibilityEnabled && !automationState.isRunning,
+                    isRunning = automationState.isRunning,
+                    onTextChange = viewModel::onAutoClickTextChange,
+                    onTap = { viewModel.runAutoClick() }
                 )
             }
         }
@@ -414,6 +423,34 @@ private fun YouTubeAutomationCard(
             )
             Spacer(Modifier.height(8.dp))
             AutomationRunButton(label = "Play karo", enabled = enabled, isRunning = isRunning, onClick = onPlay)
+        }
+    }
+}
+
+@Composable
+private fun AutoClickCard(
+    text: String,
+    enabled: Boolean,
+    isRunning: Boolean,
+    onTextChange: (String) -> Unit,
+    onTap: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+            Text(
+                "Jo bhi abhi screen par khula hai, usme yeh text dhoondh ke tap karo",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = text,
+                onValueChange = onTextChange,
+                label = { Text("Kya click karna hai (jo text screen par dikhta hai)") },
+                enabled = !isRunning,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+            AutomationRunButton(label = "Click karo", enabled = enabled, isRunning = isRunning, onClick = onTap)
         }
     }
 }

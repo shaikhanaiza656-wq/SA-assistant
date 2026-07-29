@@ -118,7 +118,7 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private fun runAutomationAction(action: String, params: Map<String, String>) {
+    private suspend fun runAutomationAction(action: String, params: Map<String, String>) {
         val command = AutomationCommand.fromWire(action, params)
         val outcome = automationExecutor.execute(command)
         _uiState.value = _uiState.value.copy(

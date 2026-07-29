@@ -15,8 +15,8 @@ android {
         applicationId = "com.sa.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.6.1-phase6-part1-wakeword"
+        versionCode = 5
+        versionName = "0.6.3-phase6-part3-wakeword-edgetts"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -91,6 +91,18 @@ dependencies {
     // pending-images tray and saved-PDF list.
     implementation(libs.androidx.exifinterface)
     implementation(libs.coil.compose)
+
+    // Phase 6 Part 3: real always-on wake-word spotting. Porcupine is
+    // Picovoice's actual published on-device engine (not a stub) — it needs
+    // the user's own free AccessKey plus a custom "SA" keyword file trained
+    // in Picovoice Console (see WakeWordPreferences kdoc / README). Until
+    // those are supplied, WakeWordListener honestly falls back to the
+    // existing SpeechRecognizer-loop approach instead of pretending to spot.
+    implementation(libs.porcupine.android)
+
+    // Real WebSocket client used to talk to Microsoft Edge's neural TTS
+    // endpoint (Edge TTS). No bundled audio, no fake network calls.
+    implementation(libs.okhttp)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.ext.junit)
